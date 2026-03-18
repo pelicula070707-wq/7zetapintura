@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audi R8 — Color Configurator</title>
+<style>
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#0a0a0a;font-family:'Segoe UI',Helvetica,Arial,sans-serif;color:#fff;-webkit-font-smoothing:antialiased}
+  canvas{display:block;width:100%;height:100%}
+
+  /* ---------- header ---------- */
+  #header{position:fixed;top:28px;left:50%;transform:translateX(-50%);text-align:center;pointer-events:none;z-index:10;user-select:none}
+  #header h1{font-size:clamp(18px,3vw,28px);font-weight:300;letter-spacing:.35em;text-transform:uppercase;color:rgba(255,255,255,.85)}
+  #header p{font-size:clamp(10px,1.6vw,13px);letter-spacing:.18em;color:rgba(255,255,255,.4);margin-top:4px;text-transform:uppercase}
+
+  /* ---------- color picker ---------- */
+  #palette{position:fixed;bottom:36px;left:50%;transform:translateX(-50%);display:flex;gap:22px;z-index:10;user-select:none}
+  .swatch{display:flex;flex-direction:column;align-items:center;cursor:pointer;transition:transform .25s ease}
+  .swatch:hover{transform:translateY(-4px)}
+  .swatch .circle{width:38px;height:38px;border-radius:50%;border:2px solid rgba(255,255,255,.15);transition:border .3s ease,box-shadow .3s ease,transform .3s ease}
+  .swatch.active .circle{border-color:rgba(255,255,255,.9);box-shadow:0 0 14px 2px rgba(255,255,255,.25);transform:scale(1.18)}
+  .swatch .label{margin-top:7px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:rgba(255,255,255,.5);transition:color .3s ease;white-space:nowrap}
+  .swatch.active .label{color:rgba(255,255,255,.9)}
+
+  /* ---------- mobile tweaks ---------- */
+  @media(max-width:520px){
+    #palette{gap:14px;bottom:24px}
+    .swatch .circle{width:30px;height:30px}
+    .swatch .label{font-size:8px}
+    #header{top:16px}
+  }
+</style>
+</head>
+<body>
+
+<!-- UI -->
+<div id="header">
+  <h1>Audi R8</h1>
+  <p>Color Configurator</p>
+</div>
+
+<div id="palette"></div>
+
+<script type="importmap">
+{
+  "imports":{
+    "three":"https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ================================================================
+   CONFIG
+   ================================================================ */
+const COLORS = [
+  { name:'Rojo Racing',   hex:'#E10600' },
+  { name:'Negro Phantom', hex:'#0B0B0B' },
+  { name:'Blanco Glacier',hex:'#F2F2F2' },
+  { name:'Azul Sepang',   hex:'#003D7A' },
+  { name:'Gris Nardo',    hex:'#8C8C8C' }
+];
+
+const AUTO_SPEED    = (2*Math.PI)/10;   // full turn in ~10 s
+const DRAG_DAMP     = 0.92;             // drag inertia decay
+const RESUME_SPEED  = 1.0;              // seconds to resume auto-rotation
+const COLOR_LERP_T  = 0.06;             // per-frame colour lerp (≈0.5 s transition at 60 fps)
+
+/* ================================================================
+   SCENE SETUP
+   ================================================================ */
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(window.innerWidth,window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0a);
+scene.fog = new THREE.Fog(0x0a0a0a,18,40);
+
+const camera = new THREE.PerspectiveCamera(35,window.innerWidth/window.innerHeight,0.1,100);
+camera.position.set(0,2.6,7.5);
+camera.lookAt(0,0.5,0);
+
+/* ================================================================
+   LIGHTING — showroom / studio look
+   ================================================================ */
+const ambient = new THREE.AmbientLight(0xffffff,0.25);
+scene.add(ambient);
+
+// Key light — warm, from front-right
+const key = new THREE.DirectionalLight(0xffeedd,2.2);
+key.position.set(5,8,6);
+key.castShadow = true;
+key.shadow.mapSize.set(1024,1024);
+key.shadow.camera.near=0.5; key.shadow.camera.far=30;
+key.shadow.camera.left=-6; key.shadow.camera.right=6;
+key.shadow.camera.top=6;  key.shadow.camera.bottom=-6;
+key.shadow.bias=-0.0005;
+scene.add(key);
+
+// Fill light — cool, from left
+const fill = new THREE.DirectionalLight(0xaaccff,0.8);
+fill.position.set(-6,5,-3);
+scene.add(fill);
+
+// Rim light — from behind
+const rim = new THREE.DirectionalLight(0xffffff,1.0);
+rim.position.set(0,4,-7);
+scene.add(rim);
+
+// Top area light feel via hemisphere
+const hemi = new THREE.HemisphereLight(0xffffff,0x222222,0.35);
+scene.add(hemi);
+
+/* ================================================================
+   REFLECTIVE FLOOR
+   ================================================================ */
+const floorGeo = new THREE.PlaneGeometry(60,60);
+const floorMat = new THREE.MeshStandardMaterial({
+  color:0x111111, metalness:0.8, roughness:0.35
+});
+const floor = new THREE.Mesh(floorGeo,floorMat);
+floor.rotation.x = -Math.PI/2;
+floor.position.y = -0.01;
+floor.receiveShadow = true;
+scene.add(floor);
+
+/* ================================================================
+   AUDI R8 MODEL  (Three.js primitives)
+   ================================================================ */
+const carGroup = new THREE.Group();
+scene.add(carGroup);
+
+// -- Materials --
+const bodyColor = new THREE.Color(COLORS[0].hex);
+const targetColor = new THREE.Color(COLORS[0].hex);
+
+const bodyMat = new THREE.MeshPhysicalMaterial({
+  color: bodyColor,
+  metalness: 0.75,
+  roughness: 0.22,
+  clearcoat: 1.0,
+  clearcoatRoughness: 0.08,
+  reflectivity: 1
+});
+
+const darkMat = new THREE.MeshStandardMaterial({ color:0x111111, metalness:0.6, roughness:0.35 });
+const chromeMat = new THREE.MeshStandardMaterial({ color:0xcccccc, metalness:1, roughness:0.12 });
+const glassMat  = new THREE.MeshPhysicalMaterial({ color:0x88bbff, metalness:0, roughness:0.05, transparent:true, opacity:0.35, transmission:0.6 });
+const tailLightMat = new THREE.MeshStandardMaterial({ color:0xff1111, emissive:0xff0000, emissiveIntensity:0.5, metalness:0.3, roughness:0.3 });
+const headLightMat = new THREE.MeshStandardMaterial({ color:0xffffff, emissive:0xffffff, emissiveIntensity:0.7, metalness:0.3, roughness:0.2 });
+const tireMat  = new THREE.MeshStandardMaterial({ color:0x1a1a1a, metalness:0.1, roughness:0.85 });
+const rimMat   = new THREE.MeshStandardMaterial({ color:0x999999, metalness:0.95, roughness:0.15 });
+const grilleMat = new THREE.MeshStandardMaterial({ color:0x0a0a0a, metalness:0.4, roughness:0.6 });
+
+function m(geo, mat, px,py,pz, rx,ry,rz, sx,sy,sz){
+  const mesh = new THREE.Mesh(geo,mat);
+  mesh.position.set(px||0,py||0,pz||0);
+  if(rx||ry||rz) mesh.rotation.set(rx||0,ry||0,rz||0);
+  if(sx) mesh.scale.set(sx,sy||sx,sz||sx);
+  mesh.castShadow=true; mesh.receiveShadow=true;
+  return mesh;
+}
+
+// ---- BODY (main cabin) ----
+// Lower body — wide, long, low sports-car shape
+const bodyLower = m(new THREE.BoxGeometry(2.1,0.45,5.0), bodyMat, 0,0.48,0);
+carGroup.add(bodyLower);
+
+// Body sides — slight taper front
+const sideL = m(new THREE.BoxGeometry(0.08,0.5,4.6), bodyMat, -1.05,0.55,0);
+carGroup.add(sideL);
+const sideR = m(new THREE.BoxGeometry(0.08,0.5,4.6), bodyMat, 1.05,0.55,0);
+carGroup.add(sideR);
+
+// Fender bulges (rear)
+const fenderGeo = new THREE.SphereGeometry(0.35,16,12,0,Math.PI,0,Math.PI);
+const fenderL = m(fenderGeo, bodyMat, -0.95,0.55,-1.15);
+fenderL.scale.set(1.0,0.7,1.5);
+carGroup.add(fenderL);
+const fenderR = m(fenderGeo, bodyMat, 0.95,0.55,-1.15);
+fenderR.scale.set(1.0,0.7,1.5);
+carGroup.add(fenderR);
+
+// Front fender bulges
+const ffGeo = new THREE.SphereGeometry(0.3,16,12,0,Math.PI,0,Math.PI);
+const fenderFL = m(ffGeo, bodyMat, -0.9,0.5,1.3);
+fenderFL.scale.set(1.0,0.6,1.2);
+carGroup.add(fenderFL);
+const fenderFR = m(ffGeo, bodyMat, 0.9,0.5,1.3);
+fenderFR.scale.set(1.0,0.6,1.2);
+carGroup.add(fenderFR);
+
+// Hood (front section — lower, tapered)
+const hoodGeo = new THREE.BoxGeometry(1.9,0.12,1.8);
+const hood = m(hoodGeo, bodyMat, 0,0.73,1.35);
+carGroup.add(hood);
+
+// Front nose — low sloping
+const noseGeo = new THREE.BoxGeometry(1.7,0.25,0.5);
+const nose = m(noseGeo, bodyMat, 0,0.55,2.45);
+carGroup.add(nose);
+
+// Front splitter
+const splitter = m(new THREE.BoxGeometry(2.0,0.06,0.15), darkMat, 0,0.32,2.65);
+carGroup.add(splitter);
+
+// ---- CABIN / ROOF ----
+// Windshield frame area
+const cabinGeo = new THREE.BoxGeometry(1.6,0.5,1.6);
+const cabin = m(cabinGeo, bodyMat, 0,1.0,0.3);
+carGroup.add(cabin);
+
+// Roof (slightly curved feel)
+const roofGeo = new THREE.BoxGeometry(1.5,0.08,1.5);
+const roof = m(roofGeo, darkMat, 0,1.26,0.25);
+carGroup.add(roof);
+
+// A-pillars (windshield slope)
+const pillarGeo = new THREE.BoxGeometry(0.08,0.55,0.08);
+const pillarL = m(pillarGeo, darkMat, -0.75,1.0,1.05, 0,0,0.35);
+carGroup.add(pillarL);
+const pillarR = m(pillarGeo, darkMat, 0.75,1.0,1.05, 0,0,-0.35);
+carGroup.add(pillarR);
+
+// Windshield glass
+const wsGeo = new THREE.PlaneGeometry(1.5,0.6);
+const ws = m(wsGeo, glassMat, 0,1.05,1.08, -0.55,0,0);
+carGroup.add(ws);
+
+// Rear window
+const rwGeo = new THREE.PlaneGeometry(1.4,0.45);
+const rw = m(rwGeo, glassMat, 0,1.05,-0.55, 0.4,Math.PI,0);
+carGroup.add(rw);
+
+// Side windows
+const swGeo = new THREE.PlaneGeometry(1.2,0.38);
+const swL = m(swGeo, glassMat, -0.81,1.02,0.3, 0,Math.PI/2,0);
+carGroup.add(swL);
+const swR = m(swGeo, glassMat, 0.81,1.02,0.3, 0,-Math.PI/2,0);
+carGroup.add(swR);
+
+// ---- ENGINE COVER (rear mid-engine) ----
+const engCover = m(new THREE.BoxGeometry(1.7,0.15,1.2), bodyMat, 0,0.78,-1.2);
+carGroup.add(engCover);
+
+// Engine cover vents (glass/dark)
+const ventGeo = new THREE.PlaneGeometry(0.5,0.9);
+const ventL = m(ventGeo, glassMat, -0.55,0.79,-1.2, -Math.PI/2,0,0);
+carGroup.add(ventL);
+const ventR = m(ventGeo, glassMat, 0.55,0.79,-1.2, -Math.PI/2,0,0);
+carGroup.add(ventR);
+
+// ---- REAR ----
+const rearPanel = m(new THREE.BoxGeometry(2.0,0.55,0.12), bodyMat, 0,0.55,-2.5);
+carGroup.add(rearPanel);
+
+// Rear diffuser
+const diffuser = m(new THREE.BoxGeometry(1.8,0.2,0.3), darkMat, 0,0.3,-2.45);
+carGroup.add(diffuser);
+
+// Diffuser fins
+for(let i=-2;i<=2;i++){
+  const fin = m(new THREE.BoxGeometry(0.03,0.15,0.25), chromeMat, i*0.2,0.32,-2.45);
+  carGroup.add(fin);
+}
+
+// Exhaust tips
+const exhGeo = new THREE.CylinderGeometry(0.06,0.07,0.15,12);
+const exhL = m(exhGeo, chromeMat, -0.55,0.3,-2.6, Math.PI/2,0,0);
+carGroup.add(exhL);
+const exhR = m(exhGeo, chromeMat, 0.55,0.3,-2.6, Math.PI/2,0,0);
+carGroup.add(exhR);
+
+// ---- HEADLIGHTS ----
+const hlGeo = new THREE.BoxGeometry(0.45,0.12,0.18);
+const hlL = m(hlGeo, headLightMat, -0.65,0.6,2.55);
+carGroup.add(hlL);
+const hlR = m(hlGeo, headLightMat, 0.65,0.6,2.55);
+carGroup.add(hlR);
+
+// ---- TAIL LIGHTS ----
+const tlGeo = new THREE.BoxGeometry(0.6,0.1,0.08);
+const tlL = m(tlGeo, tailLightMat, -0.6,0.65,-2.52);
+carGroup.add(tlL);
+const tlR = m(tlGeo, tailLightMat, 0.6,0.65,-2.52);
+carGroup.add(tlR);
+
+// Tail light bar (connecting strip — R8 signature)
+const tlBar = m(new THREE.BoxGeometry(1.5,0.04,0.06), tailLightMat, 0,0.65,-2.52);
+carGroup.add(tlBar);
+
+// ---- FRONT GRILLE ----
+const grille = m(new THREE.BoxGeometry(1.0,0.25,0.08), grilleMat, 0,0.45,2.58);
+carGroup.add(grille);
+
+// Side intakes (front)
+const intakeGeo = new THREE.BoxGeometry(0.35,0.18,0.08);
+const intakeL = m(intakeGeo, grilleMat, -0.75,0.42,2.58);
+carGroup.add(intakeL);
+const intakeR = m(intakeGeo, grilleMat, 0.75,0.42,2.58);
+carGroup.add(intakeR);
+
+// Audi rings placeholder — chrome bar on grille
+const rings = m(new THREE.BoxGeometry(0.3,0.06,0.1), chromeMat, 0,0.52,2.62);
+carGroup.add(rings);
+
+// ---- SIDE BLADES (R8 signature) ----
+const bladeGeo = new THREE.BoxGeometry(0.04,0.35,0.9);
+const bladeL = m(bladeGeo, darkMat, -1.07,0.6,-0.6);
+carGroup.add(bladeL);
+const bladeR = m(bladeGeo, darkMat, 1.07,0.6,-0.6);
+carGroup.add(bladeR);
+
+// ---- SIDE SKIRTS ----
+const skirtGeo = new THREE.BoxGeometry(0.1,0.12,3.8);
+const skirtL = m(skirtGeo, darkMat, -1.05,0.27,0);
+carGroup.add(skirtL);
+const skirtR = m(skirtGeo, darkMat, 1.05,0.27,0);
+carGroup.add(skirtR);
+
+// ---- WHEELS ----
+function createWheel(x,z){
+  const wg = new THREE.Group();
+
+  // Tire
+  const tire = new THREE.Mesh(new THREE.TorusGeometry(0.32,0.12,12,24), tireMat);
+  tire.rotation.y = Math.PI/2;
+  tire.castShadow=true;
+  wg.add(tire);
+
+  // Rim disc
+  const rd = new THREE.Mesh(new THREE.CylinderGeometry(0.26,0.26,0.1,20), rimMat);
+  rd.rotation.z = Math.PI/2;
+  rd.castShadow=true;
+  wg.add(rd);
+
+  // Rim spokes (5-spoke)
+  for(let i=0;i<5;i++){
+    const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.24,0.04,0.035), rimMat);
+    spoke.rotation.x = (i/5)*Math.PI*2;
+    spoke.position.y = Math.sin(spoke.rotation.x)*0.12;
+    spoke.position.z = Math.cos(spoke.rotation.x)*0.12;
+    wg.add(spoke);
+  }
+
+  // Center cap
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,0.12,12), chromeMat);
+  cap.rotation.z = Math.PI/2;
+  wg.add(cap);
+
+  // Brake disc visible behind rim
+  const brake = new THREE.Mesh(new THREE.CylinderGeometry(0.2,0.2,0.03,16), new THREE.MeshStandardMaterial({color:0x555555,metalness:0.8,roughness:0.4}));
+  brake.rotation.z = Math.PI/2;
+  brake.position.x = x>0?-0.04:0.04;
+  wg.add(brake);
+
+  wg.position.set(x,0.32,z);
+  return wg;
+}
+
+const wheelPositions = [
+  [-1.0, 1.35],[ 1.0, 1.35],   // front
+  [-1.0,-1.25],[ 1.0,-1.25]    // rear
+];
+const wheels = wheelPositions.map(([x,z])=>{
+  const w = createWheel(x,z);
+  carGroup.add(w);
+  return w;
+});
+
+// ---- MIRRORS ----
+const mirGeo = new THREE.BoxGeometry(0.12,0.08,0.18);
+const mirL = m(mirGeo, bodyMat, -0.9,0.92,0.75);
+carGroup.add(mirL);
+const mirR = m(mirGeo, bodyMat, 0.9,0.92,0.75);
+carGroup.add(mirR);
+
+// Mirror arm
+const armGeo = new THREE.BoxGeometry(0.1,0.04,0.04);
+const armL = m(armGeo, darkMat, -0.84,0.9,0.75);
+carGroup.add(armL);
+const armR = m(armGeo, darkMat, 0.84,0.9,0.75);
+carGroup.add(armR);
+
+// Collect body parts for color change
+const bodyParts = [bodyLower,sideL,sideR,fenderL,fenderR,fenderFL,fenderFR,hood,nose,cabin,rearPanel,engCover,mirL,mirR];
+
+/* ================================================================
+   UI — COLOR PALETTE
+   ================================================================ */
+let activeIdx = 0;
+const palette = document.getElementById('palette');
+
+COLORS.forEach((c,i)=>{
+  const swatch = document.createElement('div');
+  swatch.className = 'swatch' + (i===0?' active':'');
+  swatch.innerHTML = `<div class="circle" style="background:${c.hex}"></div><div class="label">${c.name}</div>`;
+  swatch.addEventListener('click',()=>selectColor(i));
+  palette.appendChild(swatch);
+});
+
+function selectColor(idx){
+  if(idx===activeIdx) return;
+  activeIdx=idx;
+  targetColor.set(COLORS[idx].hex);
+  document.querySelectorAll('.swatch').forEach((s,i)=>s.classList.toggle('active',i===idx));
+}
+
+/* ================================================================
+   INTERACTION — DRAG ROTATION
+   ================================================================ */
+let isDragging = false;
+let prevX = 0;
+let dragVelocity = 0;
+let manualInfluence = 0;  // 0 = full auto, 1 = full manual
+
+const canvas = renderer.domElement;
+
+function onPointerDown(e){
+  isDragging=true;
+  prevX = e.clientX ?? e.touches[0].clientX;
+  dragVelocity=0;
+  manualInfluence=1;
+}
+function onPointerMove(e){
+  if(!isDragging) return;
+  const x = e.clientX ?? e.touches[0].clientX;
+  const dx = x - prevX;
+  dragVelocity = dx*0.008;
+  carGroup.rotation.y += dragVelocity;
+  prevX = x;
+}
+function onPointerUp(){
+  isDragging=false;
+}
+
+canvas.addEventListener('pointerdown',onPointerDown);
+canvas.addEventListener('pointermove',onPointerMove);
+canvas.addEventListener('pointerup',onPointerUp);
+canvas.addEventListener('pointerleave',onPointerUp);
+canvas.style.touchAction='none';
+
+/* ================================================================
+   RESIZE
+   ================================================================ */
+window.addEventListener('resize',()=>{
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+});
+
+/* ================================================================
+   RENDER LOOP
+   ================================================================ */
+const clock = new THREE.Clock();
+
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(),0.05);
+
+  // --- auto rotation ---
+  if(!isDragging){
+    manualInfluence = Math.max(0, manualInfluence - dt/RESUME_SPEED);
+  }
+  const autoAmount = (1 - manualInfluence) * AUTO_SPEED * dt;
+
+  // Apply inertia from manual drag
+  if(!isDragging){
+    dragVelocity *= DRAG_DAMP;
+  }
+  carGroup.rotation.y += autoAmount + (isDragging?0:dragVelocity);
+
+  // --- wheels spin (visual only, based on rotation speed) ---
+  const totalSpeed = autoAmount + Math.abs(dragVelocity);
+  wheels.forEach(w=>{
+    w.children.forEach(c=>{ c.rotation.x += totalSpeed*3; });
+  });
+
+  // --- smooth colour transition ---
+  bodyMat.color.lerp(targetColor, COLOR_LERP_T);
+
+  renderer.render(scene,camera);
+}
+
+animate();
+</script>
+</body>
+</html>
